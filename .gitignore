@@ -16,4 +16,5 @@ __pycache__/
 *.tmp
 *.swp
 *.bak
+keycloak-auth-manager.tar.gz
 logs/
