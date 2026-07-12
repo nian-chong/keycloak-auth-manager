@@ -97,13 +97,60 @@ else
     KEYCLOAK_EXISTS=$(docker ps -a --filter "name=keycloak" --format "{{.Names}}" | head -1)
     if [ -n "$KEYCLOAK_EXISTS" ]; then
         echo "    ! Keycloak 容器存在但未运行: $KEYCLOAK_EXISTS"
-        echo "    启动命令: docker start $KEYCLOAK_EXISTS"
+        read -p "    是否尝试启动该容器? (y/n) [y]: " start_kc_now
+        start_kc_now=${start_kc_now:-y}
+        if [ "$start_kc_now" = "y" ]; then
+            if docker start "$KEYCLOAK_EXISTS" &> /dev/null; then
+                echo "    ✓ 容器 $KEYCLOAK_EXISTS 已启动"
+                KEYCLOAK_RUNNING="$KEYCLOAK_EXISTS"
+            else
+                echo "    ✗ 容器启动失败"
+                check_passed=false
+            fi
+        else
+            check_passed=false
+        fi
     else
         echo "    ✗ Keycloak 容器不存在"
-        echo "    需要先安装 Keycloak"
-        check_passed=false
+        read -p "    是否现在自动部署 Keycloak 容器? (y/n) [y]: " deploy_kc_now
+        deploy_kc_now=${deploy_kc_now:-y}
+        if [ "$deploy_kc_now" = "y" ]; then
+            echo ""
+            echo "--- 部署 Keycloak 容器配置 ---"
+            read -p "    选择数据库类型 (h2/postgres) [h2]: " kc_db_type
+            kc_db_type=${kc_db_type:-h2}
+            
+            read -p "    设置 Keycloak 管理员用户名 [admin]: " kc_admin_user
+            kc_admin_user=${kc_admin_user:-admin}
+            
+            read -sp "    设置 Keycloak 管理员密码 [admin123]: " kc_admin_pass
+            echo ""
+            kc_admin_pass=${kc_admin_pass:-admin123}
+            
+            read -p "    设置 Keycloak 映射端口 [8080]: " kc_port
+            kc_port=${kc_port:-8080}
+            
+            kc_db_pass=""
+            if [ "$kc_db_type" = "postgres" ]; then
+                read -sp "    设置 PostgreSQL 数据库密码 [KcDbPassWord_2026]: " kc_db_pass
+                echo ""
+                kc_db_pass=${kc_db_pass:-KcDbPassWord_2026}
+            fi
+            
+            echo "    正在调用 deploy_keycloak.sh 部署容器..."
+            if bash deploy_keycloak.sh "$kc_db_type" "$kc_admin_user" "$kc_admin_pass" "$kc_port" "$kc_db_pass"; then
+                echo "    ✓ Keycloak 容器部署成功"
+                KEYCLOAK_RUNNING="keycloak"
+            else
+                echo "    ✗ Keycloak 容器部署失败"
+                check_passed=false
+            fi
+        else
+            check_passed=false
+        fi
     fi
 fi
+
 
 # 检查 oauth2-proxy 镜像
 echo "[5] 检查 oauth2-proxy..."
@@ -135,41 +182,74 @@ echo ""
 echo "请输入配置信息（直接回车使用默认值）:"
 echo ""
 
+# 获取本地 IP 供默认值使用
+local_ip=$(hostname -I | awk '{print $1}')
+local_ip=${local_ip:-127.0.0.1}
+
+# 自动探测运行中 Keycloak 容器的映射端口
+kc_detected_port=""
+if [ -n "$KEYCLOAK_RUNNING" ]; then
+    kc_detected_port=$(docker port "$KEYCLOAK_RUNNING" 8080 2>/dev/null | head -n1 | cut -d':' -f2)
+fi
+kc_detected_port=${kc_detected_port:-${kc_port:-8080}}
+
+default_kc_url="http://$local_ip:$kc_detected_port"
+
 # Keycloak URL
-read -p "Keycloak 服务地址 [https://keycloak.your-domain.com]: " KEYCLOAK_URL
-KEYCLOAK_URL=${KEYCLOAK_URL:-}
+read -p "Keycloak 服务地址 [$default_kc_url]: " KEYCLOAK_URL
+KEYCLOAK_URL=${KEYCLOAK_URL:-$default_kc_url}
 
 # 验证 Keycloak URL 是否可访问
 echo "    测试 Keycloak 连接..."
-if curl -s -o /dev/null -w "%{http_code}" "$KEYCLOAK_URL" --max-time 10 | grep -q "200\|302"; then
+if curl -s -o /dev/null -w "%{http_code}" "$KEYCLOAK_URL" --max-time 10 | grep -q "200\|302\|303\|307\|404"; then
     echo "    ✓ Keycloak URL 可访问"
 else
-    echo "    ! Keycloak URL 无法访问，请确认地址正确"
+    echo "    ! Keycloak URL 无法访问，请确认地址正确（若容器刚启动请稍候）"
 fi
 
 # Keycloak Admin 用户名
-read -p "Keycloak Admin 用户名 [admin]: " KEYCLOAK_ADMIN
-KEYCLOAK_ADMIN=${KEYCLOAK_ADMIN:-admin}
+default_kc_admin=${kc_admin_user:-admin}
+read -p "Keycloak Admin 用户名 [$default_kc_admin]: " KEYCLOAK_ADMIN
+KEYCLOAK_ADMIN=${KEYCLOAK_ADMIN:-$default_kc_admin}
 
 # Keycloak Admin 密码
-read -sp "Keycloak Admin 密码 [YOUR_PASSWORD]: " KEYCLOAK_PASSWORD
-echo ""
-KEYCLOAK_PASSWORD=${KEYCLOAK_PASSWORD:-}
+default_kc_pass=${kc_admin_pass:-}
+if [ -n "$default_kc_pass" ]; then
+    read -sp "Keycloak Admin 密码 [使用自动部署时设置的密码]: " KEYCLOAK_PASSWORD
+    echo ""
+    KEYCLOAK_PASSWORD=${KEYCLOAK_PASSWORD:-$default_kc_pass}
+else
+    read -sp "Keycloak Admin 密码 [YOUR_PASSWORD]: " KEYCLOAK_PASSWORD
+    echo ""
+    KEYCLOAK_PASSWORD=${KEYCLOAK_PASSWORD:-}
+fi
 
 # Web 控制台端口
 read -p "Web 控制台端口 [8088]: " WEB_PORT
 WEB_PORT=${WEB_PORT:-8088}
 
-# 检查端口是否被占用
-if netstat -tuln | grep -q ":$WEB_PORT"; then
+# 检查端口是否被占用 (优先使用 ss, 次之 netstat)
+port_in_use="no"
+if command -v ss &> /dev/null; then
+    if ss -tuln | grep -q ":$WEB_PORT "; then
+        port_in_use="yes"
+    fi
+elif command -v netstat &> /dev/null; then
+    if netstat -tuln | grep -q ":$WEB_PORT"; then
+        port_in_use="yes"
+    fi
+fi
+
+if [ "$port_in_use" = "yes" ]; then
     echo "    ! 端口 $WEB_PORT 已被占用"
     read -p "    是否使用其他端口? 输入新端口: " NEW_PORT
     WEB_PORT=${NEW_PORT:-$WEB_PORT}
 fi
 
 # Keycloak 容器名称
-read -p "Keycloak 容器名称 [$KEYCLOAK_RUNNING]: " KEYCLOAK_CONTAINER
-KEYCLOAK_CONTAINER=${KEYCLOAK_CONTAINER:-$KEYCLOAK_RUNNING}
+default_kc_container=${KEYCLOAK_RUNNING:-keycloak}
+read -p "Keycloak 容器名称 [$default_kc_container]: " KEYCLOAK_CONTAINER
+KEYCLOAK_CONTAINER=${KEYCLOAK_CONTAINER:-$default_kc_container}
 
 # 1Panel API 端口
 read -p "1Panel API 端口 [40455]: " ONEPANEL_PORT
@@ -179,24 +259,15 @@ ONEPANEL_PORT=${ONEPANEL_PORT:-40455}
 read -p "1Panel API Key (如果不使用 API 自动建站可留空): " ONEPANEL_API_KEY
 ONEPANEL_API_KEY=${ONEPANEL_API_KEY:-}
 
-# Apple 主题安装
+# Apple 主题安装选择
 echo ""
 echo "=== Apple 主题安装 ==="
-read -p "是否安装 Apple 登录主题? (y/n): " INSTALL_THEME
-if [ "$INSTALL_THEME" = "y" ]; then
-    THEME_DIR="/opt/keycloak/themes/apple"
-    echo "    安装 Apple 主题到 $THEME_DIR..."
-    mkdir -p $THEME_DIR
-    if [ -d "themes/apple/login" ]; then
-        cp -r themes/apple/login $THEME_DIR/
-        echo "    ✓ Apple 主题已安装"
-        echo "    在 Keycloak Admin Console 选择 Login Theme: apple"
-    else
-        echo "    ! 主题文件不存在，请手动安装"
-    fi
-fi
-if ! docker ps --filter "name=$KEYCLOAK_CONTAINER" --format "{{.Names}}" | grep -q "$KEYCLOAK_CONTAINER"; then
-    echo "    ! 容器 $KEYCLOAK_CONTAINER 未运行"
+read -p "是否安装 Apple 登录主题? (y/n) [n]: " INSTALL_THEME
+INSTALL_THEME=${INSTALL_THEME:-n}
+
+# 检测容器运行状态
+if ! docker ps --filter "name=^/${KEYCLOAK_CONTAINER}$" --format "{{.Names}}" | grep -q "^${KEYCLOAK_CONTAINER}$"; then
+    echo "    ! 警示: 容器 $KEYCLOAK_CONTAINER 未运行，如果已在其他地方运行或非 Docker 部署可忽略此警告。"
 fi
 
 echo ""
@@ -315,6 +386,36 @@ if systemctl is-active --quiet $SERVICE_NAME; then
     echo "    ✓ 服务已启动"
 else
     echo "    ! 服务启动失败，请检查日志"
+fi
+
+# [7] 安装 Apple 主题
+if [ "$INSTALL_THEME" = "y" ]; then
+    echo "[7] 安装 Apple 主题..."
+    THEME_DIR="/opt/keycloak/themes/apple"
+    echo "    创建本地备份目录 $THEME_DIR..."
+    mkdir -p "$THEME_DIR"
+    if [ -d "themes/apple/login" ]; then
+        cp -r themes/apple/login "$THEME_DIR"/
+        echo "    ✓ Apple 主题本地文件已保存"
+        
+        # 复制到 Keycloak 容器内部
+        if docker ps --filter "name=^/${KEYCLOAK_CONTAINER}$" --format "{{.Names}}" | grep -q "^${KEYCLOAK_CONTAINER}$"; then
+            echo "    正在复制主题到容器 $KEYCLOAK_CONTAINER..."
+            # 确保容器内的 themes 目录存在并复制
+            docker exec "$KEYCLOAK_CONTAINER" mkdir -p /opt/keycloak/themes 2>/dev/null || true
+            docker cp themes/apple "$KEYCLOAK_CONTAINER":/opt/keycloak/themes/
+            echo "    重启 Keycloak 容器以加载新主题..."
+            docker restart "$KEYCLOAK_CONTAINER" >/dev/null
+            echo "    ✓ Apple 主题已成功安装到容器 $KEYCLOAK_CONTAINER 且已重启该容器"
+        else
+            echo "    ! 未检测到运行中的 Keycloak 容器 $KEYCLOAK_CONTAINER，无法自动复制主题到容器内。"
+            echo "    请在 Keycloak 容器启动后手动执行此命令复制主题："
+            echo "    docker cp themes/apple $KEYCLOAK_CONTAINER:/opt/keycloak/themes/"
+        fi
+        echo "    说明: 导入后，请在 Keycloak Admin Console 的 Realm Settings -> Themes 中选择 Login Theme 为 'apple'。"
+    else
+        echo "    ! 本地主题文件 themes/apple/login 不存在，跳过安装。"
+    fi
 fi
 
 echo ""
