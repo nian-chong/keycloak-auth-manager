@@ -418,7 +418,7 @@ location ^~ / {{
 
 def toggle_nginx_ssl(domain, enable):
     # 查找 1Panel 中的网站ID，修复：1Panel 该接口 orderBy 和 order 为必填字段，须在此补全
-    ws_res = call_1panel_api("/api/v1/websites/search", "POST", {"page": 1, "pageSize": 10, "info": domain, "orderBy": "created_at", "order": "null"})
+    ws_res = call_1panel_api("/api/v2/websites/search", "POST", {"Page": 1, "PageSize": 10, "Info": domain, "OrderBy": "created_at", "Order": "null"})
     if not (ws_res and ws_res.get("code") == 200 and ws_res.get("data") and ws_res["data"]["items"]):
         log("警告: 未在 1Panel 中找到对应的网站ID，跳过 SSL 设置")
         return False
@@ -433,7 +433,7 @@ def toggle_nginx_ssl(domain, enable):
     
     if enable:
         # 获取全部证书列表并在 Python 中进行手动精确过滤，解决 1Panel 接口不支持 domain 精确搜索的问题
-        ssl_res = call_1panel_api("/api/v1/websites/ssl/search", "POST", {"page": 1, "pageSize": 100})
+        ssl_res = call_1panel_api("/api/v2/websites/ssl/search", "POST", {"Page": 1, "PageSize": 100})
         if ssl_res and ssl_res.get("code") == 200 and ssl_res.get("data") and ssl_res["data"]["items"]:
             items = ssl_res["data"]["items"]
             # 匹配对应域名且状态已就绪的证书
@@ -448,14 +448,14 @@ def toggle_nginx_ssl(domain, enable):
             return False
             
     https_payload = {
-        "websiteId": ws_id,
-        "enable": enable,
-        "websiteSSLId": ssl_id,
-        "type": "existed" if ssl_id else "local",
-        "httpConfig": "HTTPToHTTPS" if enable else "none",
-        "httpsPorts": [443]
+        "WebsiteID": ws_id,
+        "Enable": enable,
+        "WebsiteSSLID": ssl_id,
+        "Type": "existed" if ssl_id else "manual",
+        "HttpConfig": "HTTPToHTTPS" if enable else "HTTPAlso",
+        "HttpsPorts": [443]
     }
-    res = call_1panel_api(f"/api/v1/websites/{ws_id}/https", "POST", https_payload)
+    res = call_1panel_api(f"/api/v2/websites/{ws_id}/https", "POST", https_payload)
     if res and res.get("code") == 200:
         log(f"1Panel SSL 设置成功（状态: {enable}）")
         return True
@@ -467,16 +467,17 @@ def create_nginx_auth(domain, oauth_port, target_port):
     
     # 尝试通过 1Panel API 自动建站
     api_payload = {
-        "primaryDomain": domain,
-        "type": "proxy",
-        "alias": domain,
-        "webSiteGroupID": 1,
-        "domains": [{"domain": domain, "port": 80}],
-        "appType": "installed",
-        "proxy": f"http://127.0.0.1:{target_port}",
-        "remark": "Keycloak Auth Manager 自动创建"
+        "PrimaryDomain": domain,
+        "Type": "proxy",
+        "Alias": domain,
+        "WebsiteGroupID": 1,
+        "Domains": [{"Domain": domain, "Port": 80}],
+        "AppType": "installed",
+        "AppInstallId": 1,
+        "Proxy": f"http://127.0.0.1:{target_port}",
+        "Remark": "Keycloak Auth Manager 自动创建"
     }
-    res = call_1panel_api("/api/v1/websites", "POST", api_payload)
+    res = call_1panel_api("/api/v2/websites", "POST", api_payload)
     if res and res.get("code") == 200:
         log("通过 1Panel API 成功创建反向代理网站")
         # 等待一秒让文件系统同步
@@ -612,19 +613,19 @@ def api_apply_ssl():
     log(f"开始为 {domain} 申请 SSL 证书...")
     
     ssl_payload = {
-        "primaryDomain": domain,
-        "provider": "dnsAccount" if dns_id else "http",
-        "acmeAccountId": int(acme_id),
-        "autoRenew": True,
-        "description": "Auto SSL by KAM",
-        "apply": True,
-        "keyType": "P256",
+        "PrimaryDomain": domain,
+        "Provider": "dnsAccount" if dns_id else "http",
+        "AcmeAccountID": int(acme_id),
+        "AutoRenew": True,
+        "Description": "Auto SSL by KAM",
+        "Apply": True,
+        "KeyType": "P256",
     }
     if dns_id:
-        ssl_payload["dnsAccountId"] = int(dns_id)
+        ssl_payload["DNSAccountID"] = int(dns_id)
     
     log("正在向 1Panel 提交 SSL 申请...")
-    ssl_res = call_1panel_api("/api/v1/websites/ssl", "POST", ssl_payload)
+    ssl_res = call_1panel_api("/api/v2/websites/ssl", "POST", ssl_payload)
     if ssl_res and ssl_res.get("code") == 200:
         ssl_id = ssl_res["data"]["id"]
         log(f"申请已提交，等待证书签发中 (此过程可能需要 1-3 分钟)...")
@@ -662,8 +663,8 @@ def api_apply_ssl():
             # 尝试寻找并读取1Panel的SSL申请日志并输出
             last_log_size, log_file = read_1panel_log(last_log_size, log_file)
 
-            # 使用 pageSize=100 并且不依赖接口内置的 domain 过滤参数以防由于过滤失效被分页吞掉
-            search_res = call_1panel_api("/api/v1/websites/ssl/search", "POST", {"page": 1, "pageSize": 100})
+            # 使用 pageSize=100 并且不依赖接口内置 of domain 过滤参数以防由于过滤失效被分页吞掉
+            search_res = call_1panel_api("/api/v2/websites/ssl/search", "POST", {"Page": 1, "PageSize": 100})
             if search_res and search_res.get("code") == 200 and search_res.get("data") and search_res["data"]["items"]:
                 item = next((x for x in search_res["data"]["items"] if x["id"] == ssl_id), None)
                 if item:
@@ -683,20 +684,20 @@ def api_apply_ssl():
         
         if ssl_ready:
             log("正在将证书绑定 to 网站并开启 HTTPS...")
-            ws_res = call_1panel_api("/api/v1/websites/search", "POST", {"page": 1, "pageSize": 10, "info": domain, "orderBy": "created_at", "order": "null"})
+            ws_res = call_1panel_api("/api/v2/websites/search", "POST", {"Page": 1, "PageSize": 10, "Info": domain, "OrderBy": "created_at", "Order": "null"})
             if ws_res and ws_res.get("code") == 200 and ws_res.get("data") and ws_res["data"]["items"]:
                 ws_item = next((x for x in ws_res["data"]["items"] if x.get("primaryDomain") == domain or domain in x.get("domains", [])), None)
                 if ws_item:
                     ws_id = ws_item["id"]
                     https_payload = {
-                        "websiteId": ws_id,
-                        "enable": True,
-                        "websiteSSLId": ssl_id,
-                        "type": "existed",
-                        "httpConfig": "HTTPToHTTPS",
-                        "httpsPorts": [443]
+                        "WebsiteID": ws_id,
+                        "Enable": True,
+                        "WebsiteSSLID": ssl_id,
+                        "Type": "existed",
+                        "HttpConfig": "HTTPToHTTPS",
+                        "HttpsPorts": [443]
                     }
-                    call_1panel_api(f"/api/v1/websites/{ws_id}/https", "POST", https_payload)
+                    call_1panel_api(f"/api/v2/websites/{ws_id}/https", "POST", https_payload)
                     log("HTTPS 绑定成功，网站配置已重载！")
                     log("全部完成!")
                     
@@ -723,7 +724,7 @@ def detail(domain):
     auth = data[domain]
     
     # 实时从 1Panel 查询此站点的 HTTPS 开启状态，修复：加入 OrderBy 和 Order 必填字段支持 API 成功拉取
-    ws_res = call_1panel_api("/api/v1/websites/search", "POST", {"page": 1, "pageSize": 10, "info": domain, "orderBy": "created_at", "order": "null"})
+    ws_res = call_1panel_api("/api/v2/websites/search", "POST", {"Page": 1, "PageSize": 10, "Info": domain, "OrderBy": "created_at", "Order": "null"})
     if ws_res and ws_res.get("code") == 200 and ws_res.get("data") and ws_res["data"]["items"]:
         ws_item = next((x for x in ws_res["data"]["items"] if x.get("primaryDomain") == domain or domain in x.get("domains", [])), None)
         if ws_item:
